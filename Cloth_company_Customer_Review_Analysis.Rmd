@@ -1,0 +1,2264 @@
+---
+title: "Data_Mining_Assessment_1"
+author: "23124607_Bratati Paul"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Customer reviews provide deeper insight into how customers perceive products and services, extending beyond what star ratings can convey. However, the large volume and unstructured nature of these reviews make them difficult to analyse manually. This study employs a range of text mining and natural language processing techniques to systematically explore customer reviews from an online retail platform, alongside structured information such as customer age, star ratings, recommendations, and peer feedback. By combining what customers say with how they rate and recommend products, the analysis builds a more complete picture of customer satisfaction and shopping behaviour.
+
+## Install and load important libraries for the analysis
+
+```{r load libraries}
+libraries <- c("tm", "tidytext", "ggplot2", "wordcloud", "syuzhet", "dplyr", "tibble", "textstem", "textdata", "tidyr", "Matrix", "topicmodels", "stringr", "reshape2", "jsonlite")
+
+#install.packages(libraries) # only for first execution
+
+for (lib in libraries) { 
+  library(lib, character.only=TRUE)
+}
+library(tidyverse)
+library(scales)
+```
+
+
+
+## Dataset Load
+
+```{r load dataset}
+filepath <- ("/Users/bratatipaul/Documents/DATA_SC_USW/DATA_MINING/ASSESSMENT_1/MS4S09 Assessment 1 Dataset.csv") 
+
+df <- as_tibble(read.csv(filepath, stringsAsFactors = FALSE))
+```
+
+
+# Initial exploration of dataset
+
+```{r dataset summary}
+
+head(df)
+tail(df)
+summary(df)
+glimpse(df)
+
+sum(is.na(df$Review.Text)) #Total no of null reviews if there is any
+```
+## Summary of dataset:
+
+The dataset comprises 23,486 observations across 9 features with one unique row-identifier column and one column containing the clothing Id, providing a comprehensive view of women’s e-commerce demographics and consumer behavior. A preliminary audit confirms the absence of null values in the primary field like Review.Text. Each observation represents a unique customer review, providing a rich source of unstructured data used in the analysis.
+
+
+## Task A---Exploratory Analysis and Text Mining
+
+This task focuses on exploring the dataset and preparing the review text for further analysis. Exploratory data analysis is conducted to understand the distribution of ratings, recommendations etc. Basic text mining techniques are then applied to clean and structure the review text, including tokenisation and frequency-based analysis. These steps provide initial insights into common themes and ensure the text data is suitable for subsequent sentiment analysis and topic modelling.
+
+```{r rename column}
+df <- df %>%
+  rename(Review_id = X) # rename the 'X' column as Review id to make it a unique identifier for review column
+
+head(df)
+data <- df # make a copy of original df to work on it onwards
+```
+
+
+# Check the product distribution across inventory
+
+```{r unique product count}
+
+#unique product count (distinct Clothing IDs) per Department and Division
+product_variety <- data %>%
+  group_by(Division.Name, Department.Name) %>%
+  summarise(unique_products = n_distinct(Clothing.ID), .groups = 'drop') %>%
+  filter(Division.Name != "", Department.Name != "") # Drop empty rows of Department and Division if any
+
+print(product_variety)
+```
+
+
+```{r product count distribution plot}
+ggplot(product_variety, 
+       aes(x = reorder(Division.Name, unique_products), 
+                            y = unique_products, 
+                            fill = Department.Name)) +
+  geom_col(position = "stack") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Unique Products per Division",
+       subtitle = "Segmented by Departmental variety",
+       x = "Division",
+       y = "Count of Unique products",
+       fill = "Department") +
+  coord_flip() +
+  theme_minimal() 
+```
+
+The next analytical step determines whether review volume per department is proportional to the unique product count or not. This assessment is critical for identifying inventory-engagement alignment, revealing whether customer interest is distributed evenly across the catalog or if specific categories generate disproportionately high levels of engagement relative to their variety.
+
+```{r review proportion}
+
+proportion_check <- data %>%
+  filter( Department.Name != "") %>% # remove empty department rows
+  group_by(Department.Name) %>%
+  summarise(
+    unique_products = n_distinct(Clothing.ID), 
+    total_reviews = n_distinct(Review_id),
+    reviews_per_product = total_reviews / unique_products # calculate the proportion of review per products
+  ) %>%
+  arrange(desc(reviews_per_product)) # re-arrange the dataframe as descending order of reviews per product
+
+print(proportion_check)
+
+
+```
+
+```{r review proportion plot}
+
+ggplot(proportion_check, 
+       aes(x = unique_products, 
+           y = reviews_per_product, 
+           label = Department.Name)) +
+  geom_point(aes(size = total_reviews, color = Department.Name), alpha = 0.7) +
+  labs(title = "Inventory Variety vs. Engagement",
+       x = "Inventory Breadth (Unique Products)",
+       y = "Engagement Ratio (Reviews per Product)",
+       size = "Total Volume") +
+  theme_minimal()
+```
+
+This analysis reveals a significant divergence between Inventory Breadth and Engagement Density. While the Intimates department maintains the highest catalog diversity, it exhibits the lowest consumer interaction, yielding only 2.54 reviews per product. In stark contrast, the Dresses department—despite possessing a significantly smaller unique product footprint—serves as the primary driver of consumer discourse, with an engagement rate of 98.7 reviews per product. This plot confirms a disproportionate distribution, suggesting that while the retailer offers a wide variety of intimates, customer passion and feedback are heavily concentrated within specific, high-velocity categories like Dresses .
+
+
+# Explore Age distribution of customer
+
+At this stage, the distribution of customer age is explored.
+
+```{r Age distribution plot}
+ggplot(data, aes(x = Age)) +
+  geom_histogram(binwidth = 2, fill = "skyblue", color = "white") +
+  labs(title = "General Distribution of Reviewer Ages",
+       x = "Age",
+       y = "Number of Reviews") +
+  theme_minimal()
+```
+The distribution indicates that while the retailer maintains a broad market, attracting customers ranging from ages 20 to 80, but the core consumer base is heavily concentrated in the 30–45 age bracket. This 'mid-age' peak represents the primary engine of brand engagement. The density in the 30s and 40s implies that the current product styling and marketing may be the most effectively resonating with the 'millennial' segment.
+
+
+It is now worthwhile to examine how customer age and department choice influence the likelihood of product recommendation.
+
+```{r age dept reco exploration}
+age_dept_rec <- data %>%
+  # Filter out rows where Department or Age is missing
+  filter(Department.Name != "")%>%
+  mutate(Age_Group = cut(Age, 
+                         breaks = c(0, 20, 35,50 ,65, Inf), 
+                         labels = c("Under 20","20-35","35-50", "50-65", "Over 65"),
+                         include.lowest = TRUE)) %>%
+  group_by(Age_Group, Department.Name) %>%
+  summarise(
+    recommend_rate = mean(as.numeric(as.character(Recommended.IND)), na.rm = TRUE), 
+    count = n(), 
+    .groups = "drop" #calculate mean recommendation rate for each age group
+  )
+
+```
+
+
+```{r age reco plot}
+# 2. Plotting as a grouped Bar Chart
+ggplot(age_dept_rec, aes(x = reorder(Department.Name, recommend_rate), 
+                         y = recommend_rate, 
+                         fill = Age_Group)) +
+  geom_col(position = "dodge", alpha = 0.9) +
+  coord_flip() +
+  scale_fill_brewer(palette = "YlGnBu") +
+  theme_minimal() +
+  labs(
+    title = "Recommendation Rate by Demographics",
+    subtitle = "Identifying department-specific response across age groups",
+    x = "Department",
+    y = "Mean Recommendation Rate (0.0 - 1.0)",
+    fill = "Age Group"
+  )
+
+```
+Recommendation rates are consistently high across all age groups and departments, indicating strong overall customer satisfaction. Customers aged 35–50 and 50–65 demonstrate the most consistent recommendation behaviour across most departments, with the exception of Trend items, suggesting that trend-focused products may be less aligned with the preferences of these age groups. In contrast, customers aged 20–35 show slightly lower recommendation rates across several categories, potentially reflecting greater sensitivity to style and fit. Although customers under 20 report high recommendation rates for Trend and Bottoms, lower satisfaction with Intimate products suggests that this category may not be well suited to younger customers.
+
+# Feedback rating correlation
+
+```{r rating with feedback}
+data %>%
+  ggplot(aes(x = factor(Rating), 
+             y = Positive.Feedback.Count)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  labs(
+    title = "Positive Feedback Count by Rating",
+    x = "Rating",
+    y = "Positive Feedback Count"
+  ) +
+  theme_minimal()
+
+```
+
+Reviews with higher ratings tend to receive more positive feedback, indicating alignment between reviewer sentiment and peer perception.
+
+
+```{r reco vs positive feedback plot}
+data %>%
+  mutate(Recommended.IND = factor(Recommended.IND, labels = c("Not Recommended", "Recommended"))) %>%
+  ggplot(aes(x = Recommended.IND, 
+             y = Positive.Feedback.Count)) +
+  geom_boxplot(fill = "darkgreen", alpha = 0.7) +
+  labs(
+    title = "Positive Feedback by Recommendation Status",
+    x = "Recommendation",
+    y = "Positive Feedback Count"
+  ) +
+  theme_minimal()
+
+```
+
+Recommended products attract  more positive feedback, reinforcing their perceived value.
+
+
+While these preliminary findings highlight clear patterns in customer demographics, recommendation behaviour, and engagement across departments, they do not explain why customers respond differently. To uncover the underlying drivers of satisfaction and dissatisfaction, a deeper examination of the unstructured review text with other features is required.
+
+
+# Cleaning the dataset
+
+To extract deeper insights into consumer behavior and ensure the robustness of the analytical findings, it is essential to transform this raw data to a clean and proper formatting dataset.
+Following the data cleaning phase, a 30% random sample was extracted. This reduction in dataset volume optimizes computational efficiency while maintaining a statistical representativeness.
+
+```{r cleaning of data}
+
+data_clean <- data %>%
+  mutate(Review.Text = str_squish(Review.Text)) %>% #cleaning up of any whitespace leading, trailing or any extra space in anywhere of written reviews.
+  filter(Review.Text != "") # remove any empty rows in Review column if there is any 
+
+#Selected features to be used in further analysis
+features <- c("Review_id", "Age", "Title", "Review.Text", "Rating", "Recommended.IND", "Positive.Feedback.Count", "Division.Name", "Department.Name", "Class.Name")
+
+data_clean <- data[ ,features] #dataframe with only selected feature
+
+set.seed(1) # for reproducibility
+
+data_clean <- data_clean %>%
+  distinct(Review.Text, .keep_all = TRUE) %>%   # keep only unique reviews
+  sample_frac(0.3) # 30% sampling of whole dataset with unique reviews
+
+data_clean <- na.omit(data_clean) # After sampling removes all rows containing null values if any
+
+dim(data_clean) # checking dimension after cleaning the dataset
+
+```
+
+
+# Task B--- Sentiment Analysis
+
+With the refined and standardized dataset, this section applies advanced Sentiment Analysis techniques to quantify the emotional tone of consumer feedback. By transforming raw text into measurable sentiment scores it is possible to move beyond simple review counts to uncover the underlying drivers of customer satisfaction across different products.
+
+First step for this analysis is to tokenize reviews.
+
+# Using word tokens
+
+```{r word tokenization}
+
+word_tokenized_data <- data_clean %>%
+  unnest_tokens(output = word, input = Review.Text, token = 'words', to_lower = TRUE ) # Tokenized the Review column by word 
+
+head(word_tokenized_data)
+dim(word_tokenized_data)
+```
+
+# Plot tokenized words
+
+```{r plot top word token}
+#count and sort tokenized word 
+tokenized_word_count <- word_tokenized_data %>%
+  count(word, sort= TRUE)
+
+ggplot(tokenized_word_count[1:10, ], 
+       aes(x = reorder(word, n), 
+           y = n)) +
+  geom_col(fill = 'red', color = 'black') +
+  labs( x = 'word' , y = 'word frequency', title = 'Top 10 most frequent word token') +
+  geom_text(aes(label = n), hjust = -0.2, size = 5) +
+  coord_flip() +
+  theme_minimal(base_size = 14)
+```
+
+
+# using bigram tokens
+
+```{r bigram token}
+
+bigram_tokenized_data <- data_clean %>%
+  unnest_tokens(output = bigram, input = 'Review.Text', token = 'ngrams', n=2 , to_lower = TRUE) # Tokenized Review column by bigrams
+
+dim(bigram_tokenized_data)
+```
+
+# Plot tokenized bigrams
+
+```{r plot top bigram token}
+#count and sort bigram tokens
+tokenized_bigram_count <- bigram_tokenized_data %>%
+  count(bigram, sort = TRUE )
+
+ggplot(tokenized_bigram_count[1:10, ],
+       aes(x = reorder(bigram, n), 
+           y = n)) +
+  geom_col(fill = 'red', color = 'black') +
+  labs( x = 'bigram' , y = 'bigram frequency', title = 'Top 10 most frequent bigram') +
+  geom_text(aes(label = n), hjust = -0.2, size = 5) +
+  coord_flip() +
+  theme_minimal(base_size = 14)
+
+```
+
+
+Preliminary frequency analysis reveals that, the most common tokens are functional stopwords, which are essential for sentence structure, lack semantic value for sentiment analysis.
+
+To obtain meaningful insights, token cleaning is necessary, as removing irrelevant words helps reduce noise and improves the interpretability of the results.
+
+# Cleaning of tokens
+
+```{r clean word token}
+
+clean_word_token <- word_tokenized_data %>%
+  anti_join(stop_words, by = 'word') # removing stop words from reviews
+
+clean_word_token$word <-  gsub('[^A-Za-z]', "", clean_word_token$word) %>% # remove any numbers or special characters in tokenized words
+  na_if(" ") %>% # Replace empty string with NA
+  lemmatize_words() #this ensures different grammatical variance of a word are treated as same 
+clean_word_token <- na.omit(clean_word_token) # Remove NA if any
+
+head(clean_word_token)
+dim(clean_word_token)
+  
+```
+
+```{r clean word token count }
+# Filtering out empty strings or null characters that may have resulted from the cleaning process and generate a sorted distribution
+clean_tokenized_word_count <- clean_word_token %>%
+  filter(nchar(word) >0 ) %>% 
+  count(word, sort = TRUE )
+```
+
+# Plot clean tokenized data
+
+```{r plot clean word token}
+ggplot(clean_tokenized_word_count[1:10,], 
+       aes(x = reorder(word, n), 
+           y = n)) +
+  geom_col(fill = 'red', color = 'black') +
+  labs( x = 'word' , 
+        y = 'word frequency',
+        title = 'Top 10 most frequent clean word')+
+  geom_text(aes(label = n), hjust = -0.2, size = 5) +
+  coord_flip() +
+  theme_minimal(base_size = 14)
+```
+
+
+# plot word cloud for clean token
+
+```{r plot clean token wordcloud}
+library(wordcloud)
+
+set.seed(1)
+pal <- brewer.pal(4, "Set1") 
+wordcloud(clean_tokenized_word_count$word, freq = clean_tokenized_word_count$n, min.freq = 10, max.words = 100, random.order = FALSE, colors = pal)
+```
+
+After cleaning of tokens the word distribution reveals a corpus dominated by subject-specific nouns (e.g., 'dress', 'size', 'color') and high-valence descriptors (e.g., 'love', 'fit', 'comfortable').
+
+# clean tokenized bigram
+
+```{r clean bigram token}
+#untokenized review using clean review text
+untokenized_data <- clean_word_token %>%
+  group_by(Review_id) %>%
+  summarise(clean_review = paste( word, collapse = " ")) %>% # reconstruct cleaned review text
+  inner_join(data_clean[, c(colnames(data_clean))], by = "Review_id") # rejoin clean_review with the features of cleaned data 
+
+clean_bigram_token <- untokenized_data %>%
+  unnest_tokens(output = bigram, input = 'clean_review', token = 'ngrams', n=2, to_lower = TRUE)
+
+dim(clean_bigram_token)
+
+```
+
+# Clean Bigram Count
+
+```{r clean bigram}
+# Filtering out empty strings or null characters that may have resulted from the cleaning process and generate a sorted distribution
+clean_tokenized_bigram_count <- clean_bigram_token %>%
+  filter(nchar(bigram) > 0) %>%
+  count(bigram, sort = TRUE )
+
+```
+
+
+```{r plot clean bigram}
+
+ggplot(clean_tokenized_bigram_count[1:10,], 
+       aes(x = reorder(bigram, n),
+           y = n)) +
+  geom_col(fill = 'red', color = 'black') +
+  labs( x = 'bigram' , y = 'bigram frequency', title = 'Top 10 most frequent clean bigram') +
+  geom_text(aes(label = n), hjust = -0.2, size = 5) +
+  coord_flip() +
+  theme_minimal(base_size = 14)
+```
+
+
+# word cloud for clean bigram
+
+```{r clean bigram wordcloud}
+set.seed(1)
+pal <- brewer.pal(4, "Set1")
+wordcloud(clean_tokenized_bigram_count$bigram, freq = clean_tokenized_bigram_count$n, min.freq = 10, max.words = 40, random.order = FALSE, colors = pal)
+```
+
+
+Post-cleaning, the textual data exhibits significantly higher semantic density, as non-substantive grammatical noise, special characters and null entries have been eliminated. This also ensures streamlines computational processing and the resulting tokens are more representative of genuine customer sentiment.
+
+# Log ods ratio of recommendation examination
+
+A Log Odds Ratio is used to find the specific words that were unique to each recommendation group, making it clear which terms were actually linked to customer recommendations instead of just showing the most common words.
+
+```{r log-odds ratio for reco}
+reco_word_counts <- clean_word_token %>%
+  count(Recommended.IND, word) %>%
+  filter(n > 100)
+
+
+word_log_odds <- reco_word_counts %>%
+  group_by(word) %>%
+  filter(sum(n) >= 10) %>%  # Taking only words used at least 10 times
+  ungroup() %>%
+  pivot_wider(names_from = Recommended.IND, values_from = n, values_fill = 0) %>%
+  mutate(log_odds = log((`1` + 1) / (sum(`1`) + 1)) - 
+                    log((`0` + 1) / (sum(`0`) + 1)))
+# formula: log((n_yes + 1) / (total_yes + 1)) - log((n_no + 1) / (total_no + 1))
+
+```
+
+
+```{r log-odds ratio plot}
+
+# 3. Plot the top 15 words for each type
+word_log_odds %>%
+  group_by(log_odds > 0) %>%
+  slice_max(abs(log_odds), n = 15) %>%
+  ungroup()%>%
+  
+  ggplot(aes(x = reorder(word, log_odds),
+             y = log_odds, 
+             fill = log_odds > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = c("firebrick", "steelblue"), labels = c("Not Recommended", "Recommended"))  +
+  labs(
+    title = "Log Odds Ratio: Distinctive Words by Recommendation",
+    x = NULL,
+    y = "Log Odds Ratio (Positive = Recommended, Negative = Not Recommended)"
+  ) +
+  theme_minimal()
+  theme(axis.text.y = element_text(size = 10))
+
+```
+This plots gives a rough idea about the customer's choices by seperating specific vocabulary that distinguishes recommended products from non-recommended ones,but it does not quantify the emotional intensity of these terms. To translate these linguistic patterns into actionable metrics, Lexicon-based Sentiment Analysis has been applied which assigns numerical values to these words to measure the overall 'health' of customer satisfaction. 
+
+# applying bing-lexicon sentiment
+
+```{r bing sentiment}
+
+#creating bing-lexicon sentiment dataframe using clean tokenized word data
+sentiment_data <- clean_word_token %>% 
+  inner_join(get_sentiments("bing"), by = "word")
+
+# calculate sentiment score for each review
+bing_score <- sentiment_data %>%
+  ungroup() %>%
+  group_by(Review_id) %>%
+  summarise(bing_sentiment = sum(sentiment == "positive") - sum(sentiment == "negative"), .groups = "drop") 
+
+#Merge the sentiment score in the cleaned data by Review id
+df_sentiment <- data_clean %>%
+  inner_join(bing_score, by = "Review_id")
+
+dim(df_sentiment)
+```
+
+
+```{r best and worst reviews by bing score}
+
+best_reviews = df_sentiment[order(df_sentiment$bing_sentiment, decreasing = TRUE)[1],"Review.Text"]
+
+for (review in best_reviews){
+  print(review)
+}
+
+worst_reviews = df_sentiment[order(df_sentiment$bing_sentiment)[1],"Review.Text"]
+
+for (review in worst_reviews){
+  print(review)
+}
+```
+
+# Visualisation of sentiment score distribution across dataset
+
+```{r visualisation of bing sentiment score distribution}
+
+ggplot(df_sentiment, 
+       aes(x = bing_sentiment)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "white") + 
+  geom_vline(aes(xintercept = mean(bing_sentiment, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", size = 1) +  # mean line
+  labs(
+    title = "Distribution of Bing Sentiment Scores",
+    subtitle = paste("Mean sentiment:", round(mean(df_sentiment$bing_sentiment, na.rm = TRUE),2)),
+    x = "Bing Sentiment Score",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14) 
+
+```
+The distribution of Bing sentiment scores across the corpus approximates a normal distribution, centered at a mean of 2.3. While the scores range from a minimum of -4 to a maximum of 9, the rightward shift (positive skew) indicates a generally favorable consumer sentiment. This distribution confirms that while extreme dissatisfaction exists, the majority of customer feedback tends toward moderate to high approval.
+This distribution follow a "Bell Curve", it means most reviews are average, with extreme "love" or extreme "hate" being rare.
+
+
+# Box plotof bing sentiment score vs rating
+
+```{r box plot bing-rating}
+
+ggplot(df_sentiment, 
+       aes(x = factor(Rating), 
+           y = bing_sentiment, 
+           fill = factor(Rating))) +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2") + 
+  labs(title = "Distribution of Bing Sentiment Scores Across Product Rating          Categories",
+       x = "Rating",
+       y = "Bing Sentiment Score",
+    fill = "Rating")  +
+  theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        legend.position = "top")+
+  theme_minimal(base_size = 14)
+
+```
+While minor outliers are present, the visualization confirms a positive correlation between Bing sentiment scores and user-provided ratings.For rating 1, mean bing score is 0 and for rating 5 mean bing score is around 3.5. This alignment validates the lexicon's ability to reflect customer satisfaction.
+
+
+```{r avg sentiment score per department}
+
+# Calculate Average Sentiment per Department
+dept_sentiment <- df_sentiment %>%
+  filter(Department.Name != "") %>% # Remove any missing department names
+  group_by(Department.Name) %>%
+  summarise(avg_sentiment = mean(bing_sentiment, na.rm = TRUE)) %>% # calculate average bing sentiment score
+  arrange(desc(avg_sentiment))
+
+dept_sentiment
+```
+
+
+```{r plot avg sentiment per department}
+# Create the Bar Chart
+ggplot(dept_sentiment, 
+       aes(x = reorder(Department.Name, avg_sentiment), 
+           y = avg_sentiment, 
+           fill = avg_sentiment > 0)) +
+  geom_col(show.legend = FALSE)  + 
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "firebrick")) +
+  labs(title = "Average Bing Sentiment Score by Department",
+       subtitle = "Comparing consumer satisfaction levels across product categories",
+       x = "Department Name",
+       y = "Mean Sentiment Score") +
+  coord_flip()+
+  theme_minimal()
+```
+
+Based on the results, the Intimate department is the highest-rated category with a score of 2.66, while the Trend department significantly lags behind the others with a score of only 0.83. This suggests that while core categories like Tops and Dresses are performing consistently well, the "Trend" department may be facing quality or styling issues that require immediate attention to align with the rest of the brand's performance.
+
+
+# Applying afinn lexicon
+
+```{r AFINN}
+#creating AFINN-lexicon sentiment dataframe using clean tokenized word data
+sentiment_data <- clean_word_token %>%
+  inner_join(get_sentiments("afinn"), by = "word")
+
+# claculate AFINN sentiment score
+sentiment_score <- sentiment_data %>%
+  ungroup() %>%
+  group_by(Review_id) %>%
+  summarise(afinn_sentiment = sum(value, na.rm = TRUE), .groups = "drop") 
+
+#including AFINN score to the sentiment dataframe created preiviously
+df_sentiment <- df_sentiment %>%
+  inner_join(sentiment_score, by = "Review_id")
+
+head(df_sentiment)
+dim(df_sentiment)
+```
+
+# Best and worst review according to afinn lexicon
+
+```{r best and worst revies based on afinn score}
+
+best_reviews = df_sentiment[order(df_sentiment$afinn_sentiment, decreasing = TRUE)[1],"Review.Text"]
+
+for (review in best_reviews){
+  print(review)
+}
+
+worst_reviews = df_sentiment[order(df_sentiment$afinn_sentiment)[1],"Review.Text"]
+
+for (review in worst_reviews){
+  print(review)
+}
+```
+# Distribution of afinn score 
+
+```{r afinn score visualisation}
+
+ggplot(df_sentiment, 
+       aes(x = afinn_sentiment)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "white") +
+  geom_vline(aes(xintercept = mean(afinn_sentiment, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", size = 1) +  # mean line
+  labs(
+    title = "Distribution of Afinn Sentiment Scores",
+    subtitle = paste("Mean sentiment:", round(mean(df_sentiment$afinn_sentiment, na.rm = TRUE),2)),
+    x = "Afinn Sentiment Score",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14) 
+```
+The AFINN sentiment distribution, characterized by a mean of 6.37 and a notable right skew, corroborates the findings of the Bing analysis. The concentration of scores in the positive range, extending to a maximum of 22, indicates that favorable reviews are not only more frequent but also carry a higher magnitude of emotional intensity than the negative ones.
+
+
+# Box plot  for rating vs sentiment score
+
+```{r box plot AFINN}
+ggplot(df_sentiment, 
+       aes(x = factor(Rating), 
+           y = afinn_sentiment, 
+           fill = factor(Rating))) +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2") + 
+  labs(
+    title = "Afinn Sentiment Score by Rating",
+    x = "Rating",
+    y = "Afinn Sentiment Score",
+    fill = "Rating"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+```
+The visualization of AFINN scores against product ratings reveals a distinct 'staircase' pattern, confirming a robust linear relationship between customer-provided ratings and textual sentiment.
+
+
+# Scatter plot bing vs afinn score
+
+```{r bing vs afinn plot}
+ggplot(df_sentiment, 
+       aes(x = bing_sentiment, 
+           y = afinn_sentiment, 
+           color = Rating)) +
+  geom_point(alpha = 0.7, size = 3) +
+  labs(
+    title = "Scatter Plot of Bing vs. AFINN Sentiment Scores",
+    subtitle = "Color represents the review rating",
+    x = "Bing Sentiment Score",
+    y = "AFINN Sentiment Score",
+    color = "Rating"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+```
+
+The scatter plot comparing Bing and AFINN scores exhibits a distinct linear trend, providing statistical evidence of inter-lexicon consistency. This linear relationship suggests that the binary classification of the Bing model and the weighted intensity of the AFINN model are capturing the same underlying emotional variance in customer feedback, thereby reinforcing the validity of the both sentiment analysis used here.
+
+
+# Apply NRC lexicon
+
+```{r nrc data}
+#creating NRC-lexicon sentiment dataframe using clean tokenized word data
+emotion_data <- clean_word_token %>%
+  inner_join(get_sentiments("nrc"), by = "word")
+
+# Calculate Sentiment scores for each review
+emotion_count <- emotion_data %>%
+  ungroup() %>%
+  group_by(Review_id) %>%
+  count(sentiment)
+
+# Pivots data so that there is a column associated with each emotion
+wide_emotion_data <- emotion_count %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = list(n = 0))
+
+# Merge with df_sentiment
+df_sentiment <- df_sentiment %>%
+  inner_join(wide_emotion_data, by = "Review_id")
+
+```
+
+
+```{r unique nrc sentiments}
+#name of unique nrc sentiments
+nrc_sentiments <- get_sentiments("nrc")
+print(unique(nrc_sentiments$sentiment))
+
+```
+
+
+
+# Distributions of emotions across departments
+
+```{r department wise emotion distribution}
+
+#Reshaping the sentiment dataframe (df_sentiment) into a long format to facilitate categorical visualization across different departments.
+long_emotion_df <- df_sentiment %>%
+  select(Department.Name, anger, anticipation, disgust, fear, joy, sadness, surprise, trust) %>% #
+  filter(Department.Name != "") %>%
+  pivot_longer(cols = -Department.Name, names_to = "emotion", values_to = "score") %>%
+  group_by(Department.Name, emotion) %>%
+  summarise(avg_score = mean(score, na.rm = TRUE), .groups = 'drop')
+
+```
+
+
+```{r nrc department plot}
+ggplot(long_emotion_df,
+       aes(x=reorder(emotion,avg_score),
+           y = avg_score,
+           fill = Department.Name)) +
+  geom_col() +
+  labs(title = "Distribution of emotion across Department",
+       y = "Average emotion score",
+       x = "Emotion")+
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    legend.position = "right"
+  )+
+  coord_flip()
+```
+The emotional profile of the corpus is characterized by a high degree of Trust, which emerges as the dominant sentiment across the Tops, Dresses, Bottoms, and Intimates departments. This suggests a consistent level of brand reliability and consumer confidence. Secondary positive drivers, such as Joy and Anticipation, show moderate mean scores across all categories, indicating a generally satisfying experience. Conversely, negative emotional markers remain largely negligible, with the minor exception of Sadness, which may be correlated with product returns or failed expectations rather than active anger.
+
+# Conclusion of Sentiment Analysis
+
+Overall, the sentiment analysis reveals a predominantly positive emotional landscape across the customer review corpus. Both Bing and AFINN sentiment distributions exhibit a right-skewed, bell-shaped pattern, indicating that most reviews express moderate to high approval, while extreme dissatisfaction or enthusiasm remains relatively rare. The strong alignment between sentiment scores and user-provided ratings validates the effectiveness of the lexicon-based approaches in capturing customer satisfaction. Department-level analysis highlights consistent positive performance for core categories such as Tops, Dresses, and Intimates, while the notably lower sentiment associated with the Trend department suggests potential quality or styling concerns requiring further investigation. Finally, NRC emotion profiling reinforces these findings, with Trust emerging as the dominant emotion and negative emotions remaining minimal, collectively confirming a strong foundation of consumer confidence in the brand.
+
+
+
+# Task C --- Topic Modelling
+
+While sentiment analysis captures the overall emotional tone of customer experiences, the analysis now moves to topic modelling to uncover the specific themes and product-related factors driving these emotions. Topic modeling functions as an unsupervised machine learning technique that identifies latent thematic structures within the corpus.
+
+# Convert Review as Term-Document-matrix
+
+Data Structuring: Converting the cleaned review text into a Term Document Matrix (TDM). This transformation is a prerequisite for Latent Dirichlet Allocation (LDA), as it reshapes individual text entries into a mathematical grid of word-frequencies that the model can process to identify latent themes.
+
+```{r corpus}
+
+corpus <- VCorpus(VectorSource(data_clean$Review.Text)) 
+
+#cleaning of corpus by removing any special character, stopwords and stemmatisation
+corpus <- tm_map(corpus, content_transformer(tolower)) %>%
+  tm_map(content_transformer(function(x) gsub('[^a-zA-Z]', " ", x))) %>%
+  tm_map(removeWords, stopwords("en")) %>%
+  tm_map(stemDocument)
+
+# using the cleaned corpus a term document matrix has been constructed restricting terms containg 4 to 15 letter weighted by Term Frequency
+tdm <- TermDocumentMatrix(corpus, control = list(wordLengths = c(4, 15), weighting = weightTf))
+
+tdm_matrix = as.matrix(tdm)
+
+dim(tdm_matrix)
+
+```
+
+
+```{r top terms in tdm}
+# cummulative frequencies of each term
+term_frequencies <- rowSums(tdm_matrix) 
+
+# converting the term frequency vector into a dataframe 
+term_freq_df <- data.frame(term = names(term_frequencies), frequency = term_frequencies)
+
+# checking top 10 terms
+top_terms <- term_freq_df %>%
+  arrange(desc(term_frequencies)) %>%
+  head(10)
+
+print(top_terms)
+dim(term_freq_df)
+
+```
+
+
+# Plot top terms
+
+```{r frequency distribution of words}
+
+ggplot(term_freq_df, 
+       aes(x = frequency)) +
+  geom_histogram(binwidth = 1) +
+  coord_flip() +
+  labs(
+    title = "Histogram of Term Frequencies",
+       x = "Term Frequency",
+       y = "Number of Terms") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+
+```
+
+As shown in the above plot, most terms have very low document frequency, suggesting high sparsity. Retaining these rare terms may distort analyses and therefore they need to be handled before diving to topic modelling.
+
+```{r filtering tdm}
+
+doc_freq <- rowSums(tdm_matrix > 0)  #Identifying how many unique documents contain each term
+doc_perc <- doc_freq / ncol(tdm_matrix) # Calculating the percentage of the corpus that contains each term
+
+# Keep terms appearing in at least 1% and at most 80% of documents to reduce noise 
+terms_keep <- names(doc_perc)[doc_perc >= 0.01 & doc_perc <= 0.80]
+
+filtered_tdm <- tdm_matrix[terms_keep, , drop = FALSE] # filtering tdm using only those informative words
+
+# Remove empty documents that no longer contain words after pruning
+filtered_tdm <- filtered_tdm[, colSums(filtered_tdm) > 0, drop = FALSE]
+
+# Remove generic evaluative words that was appearing in almost every topic
+generic_words <- c("love", "great", "nice", "perfect", "just",
+                   "like", "realli", "well", "will", "make")
+
+# remove the generic words from term document matrix
+filtered_tdm <- filtered_tdm[!(rownames(filtered_tdm) %in% generic_words), , drop = FALSE]
+
+# Again removing empty documents after filtering
+filtered_tdm <- filtered_tdm[, colSums(filtered_tdm) > 0, drop = FALSE]
+
+dim(filtered_tdm)
+
+```
+
+
+# Top terms for filtered tdm matrix
+
+```{r top term distribution in filtered tdm}
+term_frequency <- rowSums(filtered_tdm)
+
+## converting the filtered term frequency vector into a dataframe 
+term_frequency_df_filtered <- data.frame(term = names(term_frequency), frequency = term_frequency) %>%
+  arrange(desc(frequency))
+
+# checking top 10 terms
+top_terms <- term_frequency_df_filtered %>%
+  arrange(desc(term_frequency)) %>%
+  head(10)
+
+print(top_terms)
+
+dim(term_frequency_df_filtered)
+```
+
+
+```{r frequency distribution after cleaning}
+
+ggplot(term_frequency_df_filtered, 
+       aes(x = frequency )) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Histogram of Term Frequencies",
+       x = "Term Frequency",
+       y = "Number of Terms") +
+  theme_minimal(base_size = 14) +
+    theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+
+
+```
+
+Post-filtering, the term frequency distribution is significantly refined; by removing extremely rare and overly pervasive words, the corpus now highlights high-value words that will help better differentiate thematic clusters.
+
+
+```{r converting tdm to dtm}
+
+dtm <- t(filtered_tdm) # transposing the Term Document matrix (tdm) into a Document Term Matrix (dtm) format as required in LDA
+
+# Formally converting the matrix into a 'DocumentTermMatrix' class object using Term Frequency (TF) weighting to meet 'topicmodels' package requirements
+dtm_lda <- as.DocumentTermMatrix(dtm, weighting = weightTf)
+
+nDocs(dtm_lda)
+
+```
+
+
+Latent Dirichlet Allocation (LDA) is employed to uncover latent thematic structures within the text corpus by modeling documents as mixtures of topics and topics as distributions over words.
+
+```{r lda model k_8}
+set.seed(123)
+lda_model_8 <- LDA(dtm_lda, k = 8, method = "Gibbs", control = list(seed = 123, burnin = 1000, iter = 2000, thin = 100))
+
+terms(lda_model_8,8)
+```
+
+
+```{r lda model k_9}
+set.seed(123)
+lda_model_9 <- LDA(dtm_lda, k = 9, method = "Gibbs", control = list(seed = 123, burnin = 1000, iter = 2000, thin = 100))
+
+terms(lda_model_9,8)
+```
+
+
+```{r lda model k_10}
+set.seed(123)
+lda_model_10 <- LDA(dtm_lda, k = 10, method = "Gibbs", control = list(seed = 123, burnin = 1000, iter = 2000, thin = 100))
+
+ terms(lda_model_10, 8)
+```
+
+# choosing k for LDA
+```{r perplexity}
+
+range_k <- seq(3, 10, by = 1)  
+perplexities <- sapply(range_k, function(k) {
+  model <- LDA(dtm, k = k, control = list(seed = 1))
+  perplexity(model)
+})
+
+#Plotting perplexities
+plot(range_k, perplexities, type = "b", xlab = "Number of Topics", ylab = "Perplexity")
+```
+
+The selection of k=10 was finalized based on its superior semantic granularity. While mathematical perplexity favoured a simpler model, the 10-topic solution uniquely isolated topics. By choosing k=10, the analysis provides clarification regarding specific failure points (e.g., material thickness and return triggers) that more parsimonious models overlooked.
+
+
+```{r top terms in LDA}
+
+# Convert the fitted LDA model into a tidy data frame. Here the beta matrix provides insight into the semantic content of each topic by describing word–topic probabilities.
+topics <- tidy(lda_model_10, matrix = "beta")
+
+# Select top 8 terms per topic
+top_terms <- topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 8, with_ties = FALSE) %>%
+  ungroup()
+
+# Define stable topic order
+topic_levels <- sort(unique(topics$topic))
+
+```
+
+Based on the top terms from the k = 10 LDA topic model, appropriate names were assigned to each topic.
+
+```{r topic name}
+# Comprehensive topic names 
+topic_names <- c(
+  "Color & Appearance",
+  "Fabric & Construction",
+  "Online Representation & Returns",
+  "Style & Aesthetics",
+  "Comfort & Seasonality",
+  "Sizing & Fit",
+  "Usage & Wearability",
+  "Retail & Purchase Experience",
+  "Length & Proportions",
+  "Dresses & Flattering Style"
+)
+
+# Apply topic names with fixed order
+top_terms$topic <- factor(
+  top_terms$topic,
+  levels = topic_levels,
+  labels = topic_names
+)
+
+```
+
+
+# LDA visualisation
+
+
+```{r LDA top terms plot }
+
+ggplot(top_terms, 
+       aes(x = reorder(term, beta), 
+           y = beta, 
+           fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol =3) +
+  coord_flip() +
+  labs(
+    title = "Top 7 terms of each topic",
+    x = "terms",
+    y = "probbility of each term"
+  )+
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+
+```
+
+
+
+# Creating word cloud per topic
+```{r word cloud per topic}
+library(RColorBrewer)
+
+num_topics <- length(unique(topics$topic))
+
+for (i in sort(unique(topics$topic))) {
+  top_words <- topics %>%
+    filter(topic == i) %>%              
+    arrange(desc(beta)) %>%
+    slice_head(n = 30)
+  
+  wordcloud(
+    words = top_words$term,
+    freq  = top_words$beta * 1000,       
+    max.words = 30,
+    colors = brewer.pal(8, "Spectral"),
+    random.order = FALSE
+  )
+title(levels(top_terms$topic)[i])
+}
+```
+
+
+While the beta matrix characterizes each topic in terms of its most probable words and enables topic interpretation, it does not indicate how these topics are distributed across documents. To examine topic prevalence and understand how strongly each topic contributes to individual documents analyzing the gamma matrix is important, which captures document–topic proportions.
+
+```{r topic-doc prob distribution}
+# Extract document-topic proportions (gamma) 
+topic_prob <- tidy(lda_model_10, matrix = "gamma")%>%
+  rename(Review_id = document) %>% # renaming the document column as Review_id 
+  mutate(Review_id = as.character(Review_id))
+dim(topic_prob)
+```
+
+
+```{r document - topic distribution}
+
+# Identify the dominant topic for each review based on the highest topic probability (gamma)
+doc_topic <- topic_prob %>%
+  group_by(Review_id) %>%
+  slice_max(gamma, n = 1, with_ties = FALSE) %>% # select the topic with the highest gamma per review
+  ungroup() %>%
+  mutate(Topic_Label = topic_names[as.integer(as.character(topic))])  
+
+dim(doc_topic)
+
+```
+
+
+```{r joining topics with sentiment}
+
+# Create a new data frame by merging document-level topic assignments with sentiment scores using Review_id as the common identifier
+data_topic_sentiment <- df_sentiment %>%
+  mutate(Review_id = as.character(Review_id)) %>%
+  inner_join(doc_topic, by = "Review_id") 
+
+head(data_topic_sentiment)
+dim(data_topic_sentiment)
+
+```
+The number of reviews decreased from 6788 to 1886 when integrating topic assignments with data frame having sentiment analysis scores because the two analyses were conducted on partially overlapping subsets of the data; only reviews that both contained sufficient textual information for topic modeling and have valid sentiment scores are retained.
+
+# Explorings relations with topics and other metadata 
+
+# 1.Rating and topics relation
+
+Further analysis explores how the identified topics relate to other features in the dataset
+
+```{r topic and rating relation}
+
+# average rating per topic
+topic_rating <- data_topic_sentiment %>%
+  group_by(Topic_Label) %>%
+  summarise(avg_rating = mean(Rating, na.rm = TRUE),n = n()) %>%
+  arrange(avg_rating)
+
+topic_rating
+```
+
+
+```{r topic-rating visualisation}
+
+ggplot(topic_rating,
+       aes(x = reorder(Topic_Label, avg_rating), 
+           y = avg_rating)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_y_continuous(breaks = 1:5) +
+  labs(
+    title = "Average Rating by Topic",
+    x = "Topic",
+    y = "Average Rating (1–5 scale)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+
+```
+
+
+Average ratings were high across all topics (4.15–4.40), indicating overall positive customer satisfaction. Topics related to online representation and returns, style and aesthetics, and wearability received the highest ratings, while length & proportions and fabric & construction showed slightly lower but still favorable ratings.
+
+# Topics correlation with feedback value
+
+```{r topic feedback}
+topic_feedback <- data_topic_sentiment %>%
+  group_by(Topic_Label) %>%
+  summarise(
+    avg_positive_feedback = mean(Positive.Feedback.Count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+topic_feedback
+ggplot(topic_feedback,
+       aes(x = reorder(Topic_Label, avg_positive_feedback),
+           y = avg_positive_feedback)) +
+  geom_col(fill = "purple") +
+  coord_flip() +
+  labs(
+    title = "Average Positive Feedback by Topic",
+    x = NULL,
+    y = "Average Positive Feedback Count"
+  ) +
+  theme_minimal()
+
+
+```
+Average positive feedback varies across LDA topics, indicating that some themes are perceived as more helpful than others. Reviews discussing Retail & Purchase Experience, Usage & Wearability, and Style & Aesthetics receive the highest positive feedback, suggesting that experiential insights resonate strongly with customers. In contrast, topics such as Sizing & Fit and Color & Appearance attract relatively lower feedback, implying these aspects may be more expected or less informative.
+
+
+# 2.Topic wise sentiment analysis
+
+Sentiment vs. topic analysis is conducted to pinpoint exactly which product themes correlate with customer satisfaction or dissatisfaction. By mapping sentiments to specific topics, the primary drivers of brand sentiment are identified and prioritized for improvement.
+
+```{r bing topic}
+# Giving sentiment label to all reviews
+topic_sentiment_bing <- data_topic_sentiment %>%
+  mutate(
+    bing_label = case_when(
+      bing_sentiment > 0  ~ "Positive",
+      bing_sentiment < 0  ~ "Negative",
+      bing_sentiment == 0              ~ "Neutral"
+    ),bing_label = factor(bing_label, levels= c("Positive","Negative","Neutral")))
+
+
+# Count the number of reviews by topic and Bing sentiment category 
+bing_topic <- topic_sentiment_bing %>%
+  group_by(Topic_Label, bing_label) %>%
+  summarise(count = n(), .groups = "drop")
+
+```
+
+
+
+```{r plot for bing-topic}
+library(RColorBrewer)
+
+ggplot(bing_topic,aes(x = Topic_Label, 
+                      y = count, 
+                      fill = bing_label)) +
+  geom_col(position = "stack") +
+  scale_fill_brewer(
+    palette = "Paired",
+    name = "Bing Sentiment"
+  ) +
+  labs(
+    title = "Bing Sentiment Distribution by Topic",
+    x = "Topic",
+    y = "Number of Reviews"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5,size = 16),
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    legend.position = "top",
+  )
+ 
+
+```
+The plot shows that positive sentiment is dominant across almost all topics, particularly for Color & Appearance, while negative and neutral sentiments are minimal. This pattern is consistent with the topic–rating and topic-feedback analysis, which also indicates generally high average ratings across topics.
+
+```{r Afinn-topic analysis}
+
+# Create Afinn sentiment labels
+topic_sentiment_afinn <- data_topic_sentiment %>%
+  mutate(
+    afinn_label = case_when(
+      afinn_sentiment > 0  ~ "Positive",
+      afinn_sentiment < 0  ~ "Negative",
+      afinn_sentiment == 0 ~ "Neutral"
+    ),
+    afinn_label = factor(afinn_label, levels = c("Negative", "Neutral", "Positive")))
+
+afinn_topic <- topic_sentiment_afinn %>%
+  group_by(Topic_Label, afinn_label) %>%
+  summarise(count = n(), .groups = "drop")
+```
+
+
+
+```{r afinn topic plot}
+
+library(RColorBrewer)
+
+ggplot(afinn_topic,aes(x = Topic_Label, 
+                      y = count, 
+                      fill = afinn_label)) +
+  geom_col(position = "stack") +
+  scale_fill_brewer(
+    palette = "RdYlBu",
+    name = "Bing Sentiment"
+  ) +
+  labs(
+    title = "AFINN Sentiment Distribution by Topic",
+    x = "Topic",
+    y = "Number of Reviews"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5,size = 16),
+    axis.text.x = element_text(angle = 40, hjust = 1),
+    legend.position = "top",
+  )
+
+
+
+```
+
+Similarly, the AFINN-based sentiment analysis shows predominantly positive sentiment across most topics, with negative sentiment remaining comparatively low. This pattern aligns with the topic–rating analysis and reinforces the overall positive evaluation observed across topics.
+
+
+```{r nrc-topic analsis}
+
+# Prepare NRC sentiment alignemrnt with topic
+nrc_topic <- data_topic_sentiment %>%
+  group_by(Topic_Label) %>%
+  summarise(
+    trust = sum(trust, na.rm = TRUE),
+    fear = sum(fear, na.rm = TRUE),
+    sadness = sum(sadness, na.rm = TRUE),
+    anger = sum(anger, na.rm = TRUE),
+    surprise = sum(surprise, na.rm = TRUE),
+    disgust = sum(disgust, na.rm = TRUE),
+    joy = sum(joy, na.rm = TRUE),
+    anticipation = sum(anticipation, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = -Topic_Label, names_to = "Emotion", values_to = "Intensity")
+
+```
+
+
+
+```{r nrc-topic plot}
+ggplot(nrc_topic, aes(x = Topic_Label, 
+                      y = Intensity, 
+                      fill = Emotion)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "NRC Emotion Profile by Topic",
+    x = "Topic",
+    y = "Emotion Intensity (cummulative)",
+    fill = "Avg Intensity"
+  ) +
+  
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 20),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14),
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 11),
+    axis.text.y  = element_text(size = 11)
+  )
+
+  
+```
+
+The stacked bar chart of NRC emotions represents aggregated emotion word counts for each topic, where the total height of each bar reflects the cumulative number of emotion-associated words across all emotions. Positive emotions such as trust, joy, and anticipation are more prominent for topics including Color & Appearance, Comfort & Seasonality, and Sizing & Fit. In contrast, negative emotions such as anger and sadness are comparatively low across all topics. 
+
+# Conclusion of Topic Modelling 
+
+The LDA topic model identifies clear and meaningful themes that are consistently associated with high customer satisfaction. Strong agreement between topic-level ratings, feedback, and sentiment measures indicates that the extracted topics reliably reflect customer experiences. Overall, positive emotions dominate across topics, with experiential themes such as style, wearability, and retail experience standing out as particularly influential.
+
+# Task D --- Further exploration
+
+Further exploration of the dataset was conducted using additional text mining techniques to draw deeper insight by capturing fine-grained aspects, comparing topic structures across models, and examining how topics vary with document-level metadata. 
+
+# TF-IDF weighting on Reviews
+
+To further explore data, a bigram-based TF-IDF analysis is conducted to identify influential word pairs and their associated sentiment.
+
+```{r bigram-tfidf}
+
+# Ensure Id type matches
+df_sentiment <- df_sentiment %>% 
+  mutate(Review_id = as.character(Review_id))
+
+clean_bigram_token <- clean_bigram_token %>% 
+  mutate(Review_id = as.character(Review_id))
+
+# Labelling the bing score as Positive, Negative or neutral
+bigram_bing_df <- clean_bigram_token %>%
+  inner_join(df_sentiment %>% select(Review_id, bing_sentiment), by = "Review_id") %>%
+  mutate(sentiment_group = case_when(
+    bing_sentiment > 0 ~ "positive",
+    bing_sentiment < 0 ~ "negative",
+    TRUE ~ "neutral"
+  ))
+
+```
+
+
+# Compute tf-idf per sentiment group
+
+```{r sentiment grouping}
+
+# Compute TF-IDF scores for bigram sentiment-specific bigrams to identify the most distinctive two-word phrases associated with each sentiment group
+
+bigram_tf_idf_sentiment <- bigram_bing_df %>%
+  count(sentiment_group, bigram, sort = TRUE) %>%
+  bind_tf_idf(bigram, sentiment_group, n) %>%
+  arrange(sentiment_group, desc(tf_idf))
+
+```
+
+
+# Top 10 bigram per sentiment
+
+```{r top bigram senntiment}
+
+top_bing_tfidf_terms <- bigram_tf_idf_sentiment %>%
+  group_by(sentiment_group) %>%
+  slice_max(tf_idf, n = 10, with_ties = FALSE) %>%  #top 10 terms for every sentiment group
+  ungroup()
+
+```
+
+
+# Plot top bigrams by sentiment
+
+```{r plot top bigram }
+ggplot(top_bing_tfidf_terms,
+       aes(x = reorder(bigram, tf_idf), 
+           y = tf_idf, 
+           fill = sentiment_group)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment_group, scales = "free") +
+  coord_flip() +
+  labs(
+    title = "Top Bigrams by TF-IDF and Sentiment",
+    x = "Bigram",
+    y = "TF-IDF"
+  ) +
+  theme_minimal()
+
+```
+Fitting issues emerge as the most prominent concern in negative reviews, whereas fabric quality and look is more strongly associated with positive emotions. In contrast, neutral sentiment does not exhibit particularly distinctive bigram patterns, suggesting less clearly defined themes within neutral reviews.
+
+
+# AFINN sentiment for tf-idf bigrams
+
+```{r afinn-tfidf}
+
+# Compute TF-IDF scores for AFINN sentiment-specific bigrams to identify the most distinctive two-word phrases associated with each sentiment group
+
+bigram_afinn_df <- clean_bigram_token %>%
+  inner_join(df_sentiment %>% select(Review_id, afinn_sentiment), by = "Review_id") %>%
+  mutate(sentiment_group = case_when(
+    afinn_sentiment > 0 ~ "positive",
+    afinn_sentiment < 0 ~ "negative",
+    TRUE ~ "neutral"
+  ))
+
+```
+
+# TF-IDF score per sentiment group
+
+```{r afinn sentiment grouping}
+# Compute TF-IDF scores for sentiment-specific bigrams to identify the most distinctive two-word phrases associated with each sentiment group (afinn)
+
+bigram_tf_idf_afinn <- bigram_afinn_df %>%
+  count(sentiment_group, bigram, sort = TRUE) %>%
+  bind_tf_idf(bigram, sentiment_group, n) %>%
+  arrange(sentiment_group, desc(tf_idf))
+
+
+```
+
+
+```{r top 10 terms per sentiment group}
+# Top bigram across all AFINN sentiment group
+top_bigram_afinn <- bigram_tf_idf_afinn %>%
+  group_by(sentiment_group) %>%
+  slice_max(tf_idf, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+```
+
+# Plot AFINN per sentiment
+
+```{r plot top 10 terms per sentiment group}
+ggplot(top_bigram_afinn, 
+       aes(x = reorder(bigram, tf_idf), 
+           y = tf_idf, 
+           fill = sentiment_group)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment_group, scales = "free") +
+  coord_flip() +
+  labs(title = "Top Bigrams by TF-IDF (AFINN)",
+       x = "Bigram",
+       y = "TF-IDF") +
+  theme_minimal()
+
+```
+
+This analysis further confirms the findings from the Bing sentiment results, where fitting and sizing issues are predominantly associated with negative sentiment. However, in the TF-IDF bigram analysis with afinn score, fitting-related terms also appear within the positive sentiment category too, suggesting that some customers express satisfaction when sizing meets expectations. In particular, phrases such as “true size” emerge as strong drivers of positive sentiment, indicating approval of the brand’s sizing accuracy. Fabric quality also consistently contributes to positive sentiment, reinforcing its importance in shaping favorable customer perceptions.
+
+
+# Apply NMF
+
+Following the TF-IDF bigram analysis, which highlighted distinctive sentiment-driven phrases and local co-occurrence patterns, a more structured topic modelling approach is required to capture broader latent themes across the corpus. While bigram analysis is effective for identifying salient expressions such as fit or fabric-related issues, it does not group these expressions into coherent, higher-level topics. Non-negative Matrix Factorisation (NMF) is therefore applied to the TF-IDF weighted term–document matrix to uncover interpretable, parts-based topics that represent recurring product and experience dimensions. By leveraging TF-IDF weighting, NMF emphasizes informative terms while reducing the influence of frequent but less meaningful words, resulting in more focused and interpretable topic structures.
+
+```{r tf-idf weighting}
+
+corpus <- VCorpus(VectorSource(data_clean$Review.Text)) 
+
+#cleaning of corpus bu removing any special character, stopwords and stemmatisation
+corpus <- tm_map(corpus, content_transformer(tolower)) %>%
+  tm_map(content_transformer(function(x) gsub('[^a-zA-Z]', " ", x))) %>%
+  tm_map(removeWords, stopwords("en")) %>%
+  tm_map(stemDocument)
+
+# Create a Term-Document Matrix using TF-IDF weighting
+# Rows represent terms and columns represent documents
+tdm_tfidf <- TermDocumentMatrix(corpus, control = list(wordLengths = c(3, 20),
+                                                       weighting = weightTfIdf))
+tdm_tfidf_matrix = as.matrix(tdm_tfidf)
+
+# Remove terms with zero TF-IDF weight across all documents
+tdm_tfidf_matrix <- tdm_tfidf_matrix[rowSums(tdm_tfidf_matrix) > 0, , drop = FALSE]
+
+
+```
+
+
+```{r top terms according to tfidf}
+
+# Create a data frame of terms with their TF-IDF importance scores, and sort terms in descending order of importance
+term_importance <- rowSums(tdm_tfidf_matrix)
+
+top_terms_tfidf <- tibble(
+  term = names(term_importance),
+  tfidf_importance = as.numeric(term_importance)) %>%
+  arrange(desc(tfidf_importance))
+
+head(top_terms_tfidf, 20)
+```
+
+
+
+```{r plot term frequency distribution}
+ggplot(top_terms_tfidf, 
+       aes(x = tfidf_importance)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Histogram of Term Importance",
+       x = "Term Importance count",
+       y = "Number of Terms") +
+  theme_minimal(base_size = 14) 
+```
+
+
+Filtering the TF-IDF matrix is necessary to remove sparse and uninformative terms that appear in very few or nearly all documents. Such terms add noise and increase dimensionality without contributing meaningful discriminatory information. By retaining only informative terms, the analysis improves topic coherence, interpretability, and computational efficiency in downstream models such as NMF.
+
+```{r filtering tfidf}
+
+doc_freq <- rowSums(tdm_tfidf_matrix > 0) #Identifying how many unique documents contain each term
+doc_perc <- doc_freq / ncol(tdm_tfidf_matrix) #Calculating the percentage of the corpus that contains each term
+
+# Keep terms appearing in at least 1% and at most 80% of documents to reduce noise 
+terms_keep <- names(doc_perc[doc_perc >= 0.01 & doc_perc <= 0.80])
+
+# filtering tdm using only those informative words
+filtered_tdm_tfidf <- tdm_tfidf_matrix[terms_keep, , drop = FALSE]
+
+# Remove empty documents that no longer contain words after pruning 
+filtered_tdm_tfidf <- filtered_tdm_tfidf[, colSums(filtered_tdm_tfidf) > 0, drop = FALSE]
+
+# Remove generic evaluative words that was appearing in almost every topic
+generic_words <- c("love", "great", "perfect", "like", "nice", "just", "beauti","look")
+
+# remove the generic words from term document matrix
+filtered_tdm_tfidf <- filtered_tdm_tfidf[!(rownames(filtered_tdm_tfidf) %in% generic_words), , drop = FALSE]
+
+# Again removing empty documents after filtering
+filtered_tdm_tfidf <- filtered_tdm_tfidf[, colSums(filtered_tdm_tfidf) > 0, drop = FALSE]
+
+dim(filtered_tdm_tfidf)
+
+
+```
+
+After TF-IDF filtering, the term–document matrix was reduced to 459 informative terms across 6,789 reviews, yielding a compact yet representative feature space for further analysis.
+
+
+```{r filtered top term}
+# After filtering again create a data frame of terms with their TF-IDF importance scores, and sort terms in descending order of importance
+
+term_importance_filt <- rowSums(filtered_tdm_tfidf)
+
+top_terms_tfidf_filt <- tibble(
+  term = names(term_importance_filt),
+  tfidf_importance = as.numeric(term_importance_filt))%>%
+  arrange(desc(tfidf_importance))
+
+
+
+
+```
+
+```{r plot filtered term frequency distribution }
+ggplot(top_terms_tfidf_filt, 
+       aes(x = tfidf_importance)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Histogram of Term Importance",
+       x = "Term Importance count",
+       y = "Number of Terms") +
+  theme_minimal(base_size = 14)
+```
+
+Following TF-IDF filtering, the reduced term–document matrix highlights the distribution of most informative terms while suppressing common and uninformative vocabulary. This refined representation provides a suitable input for Non-negative Matrix Factorization (NMF), which decomposes the matrix into lower-dimensional components representing latent topics or aspects. Applying NMF enables the identification of coherent, parts-based topic structures that complement probabilistic topic models such as LDA, offering an alternative perspective on the thematic composition of the reviews.
+
+
+```{r convert matrix}
+# Convert to numeric matrix
+tdm_tfidf_filt_matrix <- as.matrix(filtered_tdm_tfidf)
+
+#check for missing or infinite values, as NMF requires a finite, non-negative matrix
+sum(is.na(tdm_tfidf_filt_matrix))
+sum(is.infinite(tdm_tfidf_filt_matrix))
+
+
+```
+
+
+
+```{r}
+library(NMF)
+
+set.seed(123) # for reproducibility
+
+nmf_model <- nmf(tdm_tfidf_filt_matrix, rank  = 8, method = "brunet", nrun  = 1,seed  = "nndsvd", maxIter = 200)   
+
+summary(nmf_model)
+
+```
+
+The NMF model exhibited good sparsity and topic separation, with well-defined term clusters and moderate document-level coherence, indicating a stable and interpretable factorization.
+
+
+# Get top terms from the nmf model for each topic
+
+```{r top terms NMF}
+#Extract W (basis matrix: terms × topics)
+W <- basis(nmf_model)
+
+# Convert matrix 'W' to data frame, keep row names as 'term'
+nmf_topics <- as.data.frame(W) %>%
+  rownames_to_column(var = "term") %>%
+  pivot_longer(cols = -term, names_to = "topic", values_to = "weight")
+
+#top 8 terms per topic sorting them by their weight
+top_terms_nmf <- nmf_topics %>%
+  group_by(topic) %>%
+  slice_max(weight, n = 8, with_ties = FALSE) %>% 
+  ungroup() %>%
+  arrange(topic, desc(weight))
+
+
+```
+
+
+```{r listing of topics}
+# Group top NMF terms by topic to form a list of topic-specific keywords
+
+topic_list <- split(top_terms_nmf$term, top_terms_nmf$topic)
+topic_list
+```
+
+
+```{r naming of topics}
+
+# Create a named character vector for 8 NMF topics
+nmf_topic_names <- c(
+  "Fit Issues & Expectations",
+  "Comfort & Seasonal Wear",
+  "Dresses & Flattering Fit",
+  "Fabric Quality & Care",
+  "Online Representation & Returns",
+  "Sizing & Measurement",
+  "Purchase & Retail Experience",
+  "Compliments & Usage"
+)
+# Assign descriptive topic names to the corresponding NMF topics for interpretation
+names(topic_list) <- nmf_topic_names 
+
+#converting "V1" → 1, "V2" → 2 in topic list before indexing.
+top_terms_labeled <- top_terms_nmf %>%
+  mutate(topic_label = nmf_topic_names[as.integer(sub("^V", "", topic))])
+
+
+```
+
+
+
+```{r plot topics for nmf}
+
+ggplot(top_terms_labeled, 
+       aes(x = reorder_within(term, weight, topic_label), 
+           y = weight, 
+           fill = topic_label)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~topic_label, scales = "free", ncol = 3) + 
+  scale_x_reordered() +  # cleans the labels
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(title = "NMF Topic Signatures: Customer Review Themes",
+       subtitle = "Top 10 terms weighted by TF-IDF",
+       x = NULL, 
+       y = "Weight (Importance)") +
+   theme(strip.text = element_text(face = "bold")) 
+```
+
+
+
+```{r coef matrix}
+# Extract the NMF coefficient matrix (H), transpose it so rows represent documents, and assign descriptive topic names to each topic/component
+
+H_df <- as.data.frame(t(coef(nmf_model)))
+colnames(H_df) <- nmf_topic_names # column name appears as topic names 
+
+dim(H_df)
+```
+
+
+```{r merge nmf with tdm df}
+
+# Assign review identifiers to the NMF document–topic matrix  
+H_df$Review_id <- colnames(filtered_tdm_tfidf)
+
+#merge NMF topic weights with review-level metadata
+nmf_topic_df <- data_clean %>%
+  mutate(Review_id = as.character(Review_id)) %>%
+  inner_join(H_df, by = "Review_id")
+
+head(nmf_topic_df)
+```
+
+
+```{r nmf topic distribution department wise}
+
+dept_summary <- nmf_topic_df %>%
+  group_by(Department.Name) %>%
+  summarise(across(all_of(as.character(nmf_topic_names)), mean)) %>% #Average NMF topic weights were calculated for each department 
+  pivot_longer(cols = -Department.Name, names_to = "Topic", values_to = "Weight")
+
+```
+
+
+```{r nmf topic distribution department wise plot}
+# 2. Create the Plot
+ggplot(dept_summary, 
+       aes(x = Topic, 
+           y = Department.Name, 
+           fill = Weight)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkblue") +
+  theme_minimal() + 
+  labs(title = "Thematic Focus by Department",
+       subtitle = "Using NMF Topics to identify Departmental trends",
+       x = "Customer Review Themes", 
+       y = "Department",
+       fill = "Topic Intensity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+1.Universal Pain Point (Fit Issues): "Fit Issues & Expectations" has the highest score in almost every category except Trend. This suggests that regardless of what people are buying, their biggest reason for writing a review is to discuss how the item fit compared to their expectations.
+
+2.The "Intimate" Exception: In the Intimate section, "Comfort & Seasonal Wear" go along with "Fit Issues". This makes sense—customers buying loungewear or undergarments prioritize how the fabric feels against the skin with structured tailoring.
+
+3.Trend & Aesthetics: In the Trend category, "Dresses & Flattering Fit" is the leader. This implies that customers following "Trends" are highly focused on the visual silhouette and how "flattering" the latest styles look.
+
+
+
+# Age relation with NMF Topics
+
+To understand if customer priorities shift across different life stages, this section investigates the relationship between Age Demographics and Product Topics. While the overall data tells us what is popular, this targeted analysis reveals the specific "drivers of satisfaction" for each age group. Here style, Fabric quality and Retail experience has been assessed across customer's age.  
+
+```{r Age NMf}
+
+ # Categorizing age into life-stage cohorts for demographic comparison.
+age_trends <- nmf_topic_df %>%
+  mutate(
+    Age_Group = case_when(
+      Age < 20              ~ "Under 20",
+      Age >= 20 & Age <= 34 ~ "20–34",
+      Age >= 35 & Age <= 49 ~ "35–49",
+      Age >= 50 & Age <= 64 ~ "50–64",
+      Age >= 65             ~ "65+",
+      TRUE                  ~ "Unknown"
+    )
+  ) %>%
+  group_by(Age_Group) %>%
+  summarise(
+  Style_Fit          = mean(`Dresses & Flattering Fit`, na.rm = TRUE),
+  Fabric_Quality     = mean(`Fabric Quality & Care`, na.rm = TRUE),
+  Retail_Experience  = mean(`Purchase & Retail Experience`, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+  Age_Group = factor(Age_Group, levels = c("Under 20", "20–34", "35–49", "50–64", "65+"))) %>%   # Setting factor levels to ensure the plot flows logically by age.
+  pivot_longer(cols = -Age_Group, names_to = "Topic", values_to = "Intensity")
+
+```
+
+
+```{r age plot}
+# 2. Plot with manual X-axis breaks
+ggplot(age_trends, 
+       aes(x = Age_Group, 
+           y = Intensity, 
+           color = Topic, 
+           group = Topic)) +
+  geom_line(linewidth = 1.2) + 
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "Customer Priority pattern ",
+       subtitle = "Visualizing how priorities of 'Style', Retail and 'Fabric' changes with age",
+       x = "Age Group (Decades)", 
+       y = "Mean Topic Intensity")
+```
+
+From the above plot, fabric quality appears to be the main priority for the under-20 age group, which may reflect preferences related to comfort and durability in younger or youth-focused collections. Among middle-aged customers, attention to fabric quality, style, and retail experience is more balanced, indicating a broader set of considerations when evaluating products. For older customers, style appears to be less influential, while retail experience becomes relatively more important, suggesting a greater emphasis on purchasing convenience and overall shopping experience.
+
+
+# NMF Topic Sentiment analysis
+
+The objective of this analysis is to calculate the emotional "temperature" of each identified topic. By layering sentiment scores onto our NMF clusters, we can distinguish between Value Drivers (topics with high frequency and high positive sentiment) and Friction Points (topics that may be less frequent but carry high negative sentiment). This granular view allows for a prioritized strategy, focusing improvements on the specific product attributes that most heavily impact the overall customer experience.
+
+```{r merge sentiment dataframe with nmf topic}
+#To ensure Review_id is character for a perfect match
+df_sentiment <- df_sentiment %>% mutate(Review_id = as.character(Review_id))
+nmf_topic_df <- nmf_topic_df %>% mutate(Review_id = as.character(Review_id))
+
+nmf_sentiment_data <- nmf_topic_df %>%
+  inner_join(df_sentiment %>% 
+               select(Review_id, afinn_sentiment, bing_sentiment, anticipation, 
+                      joy, negative, positive, sadness, surprise, trust, 
+                      anger, disgust, fear), 
+             by = "Review_id")
+nmf_sentiment_data
+
+head(nmf_sentiment_data)
+
+```
+
+
+```{r}
+# Compute the correlation between NMF topic weights and NRC emotion scores, and reshape the correlation matrix into long format for analysis and visualization
+
+topics <- as.character(nmf_topic_names)
+emotions <- c("anger", "disgust", "fear", "joy", "sadness", "surprise", "trust",                  "anticipation", "negative", "positive")
+
+# Calculate Correlation Matrix
+cor_matrix <- cor(nmf_sentiment_data[, topics], 
+                  nmf_sentiment_data[, emotions], 
+                  use = "complete.obs")
+
+cor_df <- as.data.frame(cor_matrix) %>%
+  rownames_to_column(var = "Topic") %>%
+  pivot_longer(cols = -Topic, names_to = "Emotion", values_to = "Correlation")
+
+```
+
+
+```{r}
+# 4. Create the Heatmap
+ggplot(cor_df, 
+       aes(x = Emotion, 
+           y = Topic, 
+           fill = Correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "red", mid ='white', high = "darkblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Emotional Signatures of NMF Topics",
+       subtitle = "Correlation between Latent Topics and NRC Emotions",
+       fill = "Corr Coeff")
+```
+
+As per the plot, for the Online Representation & Returns topic, trust shows a strong positive association, suggesting that customers generally feel confident and satisfied with how products are represented online. Anger is more prominent for topics related to fitting issues, reflecting frustration when product sizing or fit does not meet expectations. Anticipation is higher for themes associated with online shopping and receiving compliments, indicating excitement and positive expectation surrounding purchases. In contrast, fear appears more pronounced for topics related to fabric quality, which may reflect concerns about material durability or quality prior to purchase.
+
+## Conclusion -- NMF
+
+The synthesis of NMF topic modeling and sentiment analysis reveals that while the retailer maintains a high baseline of "Trust" and "Joy," customer satisfaction is highly dependent on life stage and product category. The analysis shows a clear transition in consumer priorities: younger shoppers (under 30) are primarily driven by "Style and Silhouette," whereas the core 35–49 demographic and mature segments shift their focus toward "Fabric Quality" and "Retail Experience." Despite these varying interests, "Fit Issues" emerges as the universal friction point across all departments, representing the most significant hurdle to brand recommendation. By aligning departmental strategies with these age-specific expectations—emphasizing aesthetic trends for younger cohorts and material durability for older ones—the retailer can more effectively bridge the gap between initial product attraction and long-term customer loyalty.
+
+# Apply stm
+
+Following the TF-IDF and NMF analyses, which provided insight into prominent terms and aspect-based topic structures, the analysis is further extended using Structural Topic Modelling (STM). While NMF identifies coherent, parts-based themes based solely on term distributions, STM enables the incorporation of document-level metadata to examine how topic prevalence and content vary across covariates such as ratings, age, or department. This progression allows for a more nuanced understanding of how thematic patterns are influenced by contextual factors, thereby complementing the earlier unsupervised topic modelling results.
+
+```{r stm`}
+library(stm)
+# Ensuring that metadata used here like Rating, Age contains only complete, finite cases to prevent model estimation errors
+data_for_stm <- data_clean %>%
+  filter(!is.na(Rating), !is.na(Age)) %>%
+  filter(is.finite(Rating), is.finite(Age))
+
+text <- data_clean$Review.Text
+
+# Extracting specific variables to act as 'Prevalence Covariates'. These allow the model to track how topic frequency shifts based on product performance.
+# metadata 
+meta_data <- data.frame(rating   = data_clean$Rating, feedback = data_clean$Positive.Feedback.Count, recommend = data_clean$Recommended.IND,department = data_clean$Department.Name, age = data_clean$Age)
+
+processed <- textProcessor(documents = text, metadata  = meta_data, lowercase = TRUE, removestopwords = TRUE, removenumbers = TRUE, removepunctuation = TRUE)
+
+# Thresholding and indexing the vocab to align the text data with the associated metadata.
+prep <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+
+docs  <- prep$documents
+vocab <- prep$vocab
+meta  <- prep$meta
+
+stm_out <- stm(documents = docs, vocab = vocab,data = meta,K = 8, prevalence = ~ rating + feedback, seed = 123)
+
+
+labelTopics(stm_out, n = 7)
+
+```
+
+
+```{r topic name stm}
+# 1. Extract topic proportions (Theta)
+topic_proportions <- colMeans(stm_out$theta)
+topic_proportions
+
+# Create a named vector for easy mapping
+stm_topic_names <- c(
+  "Comfort & Positive Fit",
+  "Occasion Wear & Compliments",
+  "Style & Appearance Evaluation",
+  "Jeans & Pants Fit",
+  "Dresses, Sweaters & Materials",
+  "Returns & Dissatisfaction",
+  "Sizing & Fit Accuracy",
+  "Upper-Body Fit Issues"
+)
+
+# Applying to the prevalence data
+stm_vis_df <- data.frame(
+  Topic = stm_topic_names, 
+  Proportion = topic_proportions
+)
+```
+
+
+```{r}
+ggplot(stm_vis_df, aes(x = reorder(Topic, Proportion), y = Proportion, fill = Topic)) +
+  geom_col() +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Task D: Structural Topic Prevalence",
+       subtitle = "Relative importance of customer themes across the dataset",
+       x = NULL, y = "Expected Topic Proportion") +
+  guides(fill = "none")
+```
+
+The estimated topic proportions from the Structural Topic Model indicate a relatively balanced distribution across the eight identified themes, with no single topic overwhelmingly dominating the corpus. Topics related to Sizing & Fit Accuracy and Returns & Dissatisfaction exhibit slightly higher prevalence, suggesting that fit-related concerns and post-purchase experiences are particularly salient in customer reviews. In contrast, themes such as Upper-Body Fit Issues and Comfort & Positive Fit appear somewhat less frequent but remain consistently present across the dataset. Overall, the topic distribution highlights that customer feedback is multifaceted, with attention spread across comfort, fit, style evaluation, and shopping experience rather than being driven by a single dominant concern.
+
+# Regression
+
+To move beyond descriptive analysis, Lasso logistic regression is employed to evaluate the predictive power of the STM-derived topics with respect to customer recommendation behaviour. By using topic proportions as predictors and recommendation status as the outcome variable, the model identifies which thematic dimensions are most strongly associated with positive or negative recommendations. This approach provides a robust predictive complement to topic modelling, demonstrating how specific discussion themes directly contribute to customer endorsement decisions.
+
+```{r Lasso regression}
+
+library(glmnet)
+
+X <- as.matrix(stm_out$theta) #Uses topic proportions per document as predictors
+y <- as.numeric(as.character(prep$meta$recommend)) # Binary outcome for target variable (recommend in stm metadata) whether the review recommends the product or not
+
+#Fits a regularised logistic regression with cross-validation
+cv_fit <- cv.glmnet(X, y, family = "binomial", alpha = 1)
+
+# View the most important topics
+coef <- coef(cv_fit, s = "lambda.min")
+coef
+```
+
+
+
+```{r regression coef dataframe}
+#Extract Lasso logistic regression coefficients for STM topics and map them to descriptive topic labels
+
+coef_df <- coef %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Term")
+
+coef_df <- coef_df %>%
+  filter(Term != "(Intercept)") # filtering the intercept to match the rows with number of topic
+
+# dataframe containg only topic name and the estimate of
+coef_df <- coef_df %>%
+  mutate(topic_num = as.integer(sub("^V", "", Term)),
+    Topic = stm_topic_names[topic_num])%>%
+    rename( Estimate = lambda.min) %>%
+    select(Topic, Estimate) #Estimate is the Lasso-regularised logistic regression coefficient
+head(coef_df)
+```
+
+The estimate represents the change in the log-odds of a review being recommended associated with a one-unit increase in the corresponding STM topic proportion, holding all other topics constant. The estimate tells how much that topic influences recommendation.
+
+```{r plot reg}
+
+ggplot(coef_df, 
+       aes(x = reorder(Topic, Estimate), 
+           y = Estimate, 
+           fill = Estimate > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("firebrick", "steelblue"), labels = c("Detractor", "Promoter")) +
+  theme_minimal() +
+  labs(
+    title = "Predictive Impact of Topics on Recommendation",
+    subtitle = "Lasso Regression identifying critical business drivers",
+    x = "Product Aspect (Topic)",
+    y = "Impact Weight (Coefficient)",
+    fill = "Effect"
+  )+
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold", size = 14)
+  )
+```
+
+The Structural Topic Model reveals that customer reviews are structured around a diverse set of themes related to comfort, fit, style, material quality, and post-purchase experience. The subsequent regression analysis confirms that topics associated with 'comfort and positive fit' and 'occasion wear and compliments' significantly increase the likelihood of customer recommendation, whereas topics related to returns and online service issues negatively influence recommendation behaviour. Together, these findings demonstrate that STM not only uncovers meaningful latent themes but also offers actionable insight into the factors that drive customer satisfaction and dissatisfaction.
+
+
+# POS tagging
+
+To complement the topic-level insights, part-of-speech and dependency-based analysis is applied to extract interpretable phrase-level patterns from the review text. By identifying constructions such as adjective–noun phrases and negaation phrases, this analysis provides a granular understanding of how customers articulate satisfaction and dissatisfaction linguistically.
+
+```{r load libraries for POS}
+
+library(udpipe)
+m <- udpipe_download_model(language = "english")
+ud_model <- udpipe_load_model(m$file_model)
+
+```
+```{r creating data frame}
+# from clean data Keep only rows with text and selected features
+df_text <- data_clean %>%
+  transmute(Review_id = as.character(Review_id), Department.Name, Rating, Recommended.IND, Age, text = as.character(Review.Text)) %>%
+  filter(!is.na(text), nchar(text) > 0)
+
+#Annoted the reviews
+anno <- udpipe_annotate(ud_model, x = df_text$text, doc_id = df_text$Review_id)
+
+#converting annoted reviews to a data frame like structure
+anno_df <- data.frame(anno) %>%
+  left_join(df_text %>% select(Review_id, Department.Name, Rating, Recommended.IND, Age), by = c("doc_id" = "Review_id"))
+tail(anno_df)
+
+```
+
+```{r pos column selection}
+# Isolating unique token identifiers and their lemmas to serve as a lookup for grammatical 'head' or parent words
+token_lookup <- anno_df %>%
+  select(doc_id, sentence_id, token_id, lemma) %>%
+  rename(
+    head_token_id = token_id,
+    head_lemma = lemma
+  )
+
+# Performing a left join to align each token with its corresponding 'head_lemma', effectively mapping word-to-word dependencies within each sentence and document
+anno_df <- anno_df %>%
+  left_join(token_lookup, by = c("doc_id", "sentence_id", "head_token_id"))
+
+head(anno_df)
+```
+
+Adjective–noun phrase extraction was used to identify how customers describe different product aspects.
+
+```{r finding adj-noun phases}
+#Extract ADJ + NOUN phrases (amod)
+
+adj_noun_phrases <- anno_df %>%
+  filter(dep_rel == "amod", !is.na(head_lemma)) %>%
+  transmute(
+    Review_id = as.character(doc_id),
+    Department.Name, Rating, Recommended.IND, Age,
+    phrase = str_to_lower(paste(lemma, head_lemma)),
+    adj    = str_to_lower(lemma),
+    noun   = str_to_lower(head_lemma)
+  ) %>%
+  filter(str_detect(phrase, "^[a-z]+\\s[a-z]+$")) %>%   # keep only clean two-word phrases
+  distinct(Review_id, phrase, .keep_all = TRUE)
+
+
+# Most frequent 20 phrases
+top_adj_noun_phraese <- adj_noun_phrases %>%
+  count(phrase, sort = TRUE) %>% 
+  head(20)
+top_adj_noun_phraese
+```
+
+To enhance the signal-to-noise ratio, a filtering layer was applied to remove non-informative words. This ensures that the final visualization focuses on high-density semantic pairs that represent actionable consumer insights.
+
+```{r filtering adj-noun phases}
+# Remove generic/meta phrases (e.g., "other reviewer")
+generic_nouns <- c("review", "reviewer", "people", "person", "time", "thing",
+                   "stuff", "brand", "one", "pair", "lot", "usual", "medium")
+generic_adjs  <- c("other", "first", "last", "many", "several", "same", "overall")
+
+adj_noun_phrases_clean <- adj_noun_phrases %>%
+  filter(!(noun %in% generic_nouns)) %>%
+  filter(!(adj  %in% generic_adjs))
+
+#Too many adjective noun phases are in the document. So filtering it can remove noise as spare terms or very frequent terms
+
+# Filter too-rare and too-common phrases
+
+phrase_counts <- adj_noun_phrases_clean %>%
+  count(phrase, sort = TRUE)
+
+n_reviews <- n_distinct(adj_noun_phrases_clean$Review_id)
+
+adj_noun_phrases_filtered <- adj_noun_phrases_clean %>%
+  inner_join(phrase_counts, by = "phrase") %>%
+  filter(n >= 20) %>%                      # remove very rare
+  filter(n <= 0.02 * n_reviews)            # remove too common (2% of reviews)
+
+head(adj_noun_phrases_filtered)
+```
+
+
+```{r sentiment analysis using adj-noun phases}
+
+# Ensure matching Review_id types
+df_sentiment <- df_sentiment %>%
+  mutate(Review_id = as.character(Review_id))
+
+#tfidf calculation for adj-noun phrases
+phr_tfidf <- adj_noun_phrases_filtered %>%
+  left_join(df_sentiment %>% select(Review_id, bing_sentiment), by = "Review_id") %>%
+  filter(!is.na(bing_sentiment)) %>%
+  count(bing_sentiment, phrase, sort = TRUE) %>%
+  bind_tf_idf(phrase, bing_sentiment, n) %>%
+  arrange(bing_sentiment, desc(tf_idf))
+
+  
+# Top 15 phrases per bing sentiment group
+top_phrases_adj <- phr_tfidf %>%
+  mutate(sentiment_group = case_when(
+    bing_sentiment > 0 ~ "positive",
+    bing_sentiment < 0 ~ "negative",
+    bing_sentiment == 0 ~ "neutral"
+  )) %>%
+  group_by(sentiment_group ) %>%
+  slice_max(tf_idf, n = 8, with_ties = FALSE) %>%
+  ungroup()
+
+top_phrases_adj %>%
+  select(phrase, sentiment_group, tf_idf)
+
+```
+
+```{r plot adj-noun phrase with sentiment}
+
+ggplot(top_phrases_adj[1:30,],
+       aes(x = reorder(phrase,tf_idf), y = tf_idf , fill = sentiment_group)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~  sentiment_group, scales = "free") +
+  coord_flip() +
+  labs(
+    title = "Distinctive Adjective–Noun Phrases by Sentiment",
+    x = NULL,
+    y = "TF-IDF Importance"
+  ) +
+  theme_minimal()
+
+```
+
+1.The Paradox of Price: Emphasize that "Great Price" is your most sensitive attribute. It drives both the highest satisfaction and the deepest disappointment, meaning customers are price-conscious but not "quality-blind.
+
+2."Aesthetic vs. Utility: Points like "beautiful dress" are strong, but utility phrases like "skinny jeans" and "large bust" are weighted negatively, signaling that the brand's styling is beating its sizing.
+
+
+
+
+```{r reco pos}
+phrase_by_reco <- adj_noun_phrases_filtered %>%
+  mutate(Recommended.IND = as.factor(Recommended.IND)) %>%
+  count(Recommended.IND, phrase, sort = TRUE)
+
+phrase_by_reco %>%
+  group_by(Recommended.IND) %>%
+  slice_max(n, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+```
+
+```{r top word for reco by pos plot}
+top_reco_word <- phrase_by_reco %>%
+  group_by(Recommended.IND) %>%
+  slice_max(n, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(top_reco_word, aes(x = reorder(phrase, n), y = n, fill = Recommended.IND)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(~ Recommended.IND, scales = "free_y") +
+  labs(title = "Top ADJ+NOUN Phrases by Recommendation", x = NULL, y = "Count") +
+  theme_minimal()
+
+```
+Phrase-level analysis shows that positive recommendations are driven by expressions such as “normal size”, “skinny jeans”, and “high quality”, highlighting the importance of accurate sizing and product quality. In contrast, non-recommended reviews frequently mention “smaller size”, “larger size”, and “extra fabric”, indicating dissatisfaction with fit and construction. This supports earlier findings that fit accuracy is a key driver of customer satisfaction.
+
+
+```{r neg phrase}
+
+# Identifying occurrences of the word 'not' and capturing the immediate subsequent lemma to reconstruct the negative sentiment.
+neg_phrases <- anno_df %>%
+  group_by(doc_id, sentence_id) %>%# Ensuring tokens are in original sentence order before identifying the 'next' word in the sequence.
+  arrange(token_id, .by_group = TRUE) %>%
+  mutate(next_lemma = lead(lemma)) %>%
+  ungroup() %>%
+  filter(tolower(token) == "not", !is.na(next_lemma)) %>% # Isolating bigrams where the modifier is 'not' and a target word exists.
+  transmute(
+    Review_id = as.character(doc_id),
+    Department.Name, Rating, Recommended.IND, Age,
+    phrase = str_to_lower(paste("not", next_lemma))
+ ) %>%
+  #Ensuring each unique negation phrase is counted only once per review.
+  distinct(Review_id, phrase, .keep_all = TRUE)
+
+# Identifying the top 20 most frequent 'not' phrases to pinpoint the most common areas of consumer dissatisfaction.
+neg_phrases %>% 
+  count(phrase, sort = TRUE) %>% 
+  head(20)
+
+```
+
+
+```{r filtering negation phrase}
+
+# Feature Refinement: Filtering the negation phrases to ensure the remaining bigrams represent meaningful product attributes.
+generic_neg <- c("too", "a", "be", "the","do", "in", "have", "to", "at", "as","even", "so", "for", "what", "it", ".")
+
+neg_phrases_clean <- neg_phrases %>%
+  filter(!str_remove(phrase, "not ") %in% generic_neg)
+
+
+phrase_counts <- neg_phrases_clean %>%
+  count(phrase, sort = TRUE)
+
+n_reviews <- n_distinct(adj_noun_phrases_clean$Review_id)
+
+neg_phrases_clean_filtered <- neg_phrases_clean %>%
+  inner_join(phrase_counts, by = "phrase") %>%
+  filter(n >= 20) %>%                      # remove very rare
+  filter(n <= 0.02 * n_reviews)            # remove too common (2% of reviews)
+
+```
+
+
+
+```{r top filtered neg phrase}
+
+# TF-IDF by Bing sentiment
+df_sentiment <- df_sentiment %>%
+  mutate(Review_id = as.character(Review_id))
+
+phr_tfidf <- neg_phrases_clean_filtered %>%
+  left_join(df_sentiment %>% select(Review_id, bing_sentiment), by = "Review_id") %>%
+  filter(!is.na(bing_sentiment)) %>%
+  count(bing_sentiment, phrase, sort = TRUE) %>%
+  bind_tf_idf(phrase, bing_sentiment, n) %>%
+  arrange(bing_sentiment, desc(tf_idf))
+
+# Top 15 phrases per sentiment group
+top_phrases_neg <- phr_tfidf %>%
+  mutate(sentiment_group = case_when(
+    bing_sentiment > 0 ~ "positive",
+    bing_sentiment < 0 ~ "negative",
+    bing_sentiment == 0 ~ "neutral"
+  )) %>%
+  group_by(sentiment_group ) %>%
+  slice_max(tf_idf, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+top_phrases_neg %>%
+  select(phrase, sentiment_group, tf_idf)
+```
+
+
+```{r plot top neg phrase}
+ggplot(top_phrases_neg,
+       aes(x = reorder(phrase,tf_idf), 
+           y = tf_idf , 
+           fill = sentiment_group)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~  sentiment_group, scales = "free") +
+  coord_flip() +
+  labs(
+    title = "Distinctive Adjective–Noun Phrases by Sentiment",
+    x = NULL,
+    y = "TF-IDF Importance"
+  ) +
+  theme_minimal()
+```
+
+The data reveals a "Negation Paradox": while "not work" and "not flatter" are clear markers of product failure in the Negative category, phrases like "not disappoint" and "not wait" dominate the Positive category as idiomatic expressions of high satisfaction. The Neutral tier is defined by "uncertainty" phrases like "not sure" and "not really," pinpointing a segment of underwhelmed customers who are at risk of churning.
+
+
+## Conclusion
+Overall, this study integrates multiple text mining and analytical techniques to develop a holistic understanding of customer experiences in retail reviews. LDA topic modelling reveals broad, coherent themes and shows that experiential topics such as style, wearability, and retail experience are consistently associated with high ratings and positive sentiment. NMF further refines these insights by producing more interpretable, parts-based topics that emphasise distinctive issues related to fit, fabric quality, and post-purchase experience. STM extends this analysis by linking topics to customer behaviour, demonstrating that comfort and accurate fit significantly increase the likelihood of recommendation, while delivery and return issues drive dissatisfaction. Regression analysis confirms the predictive importance of these themes, and POS-based phrase extraction provides fine-grained interpretability by revealing how customers explicitly express praise and complaints in their own words.
+
+Taken together, the findings consistently highlight fit accuracy, comfort, and perceived quality as the strongest drivers of customer satisfaction, while shortcomings in online representation and returns emerge as the primary sources of dissatisfaction, offering clear and actionable directions for product and service improvement.
