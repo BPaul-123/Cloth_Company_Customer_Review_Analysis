@@ -1,6 +1,7 @@
 ---
-title: "Data_Mining_Assessment_1"
-author: "23124607_Bratati Paul"
+title: "Cloth_Company_Customer_Review_Analysis
+"
+author: "Bratati Paul"
 date: "`r Sys.Date()`"
 output:
   pdf_document:
